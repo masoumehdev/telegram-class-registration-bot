@@ -29,10 +29,23 @@ from telegram.ext import (
 )
 from datetime import datetime
 
+
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID_VALUE = os.getenv("ADMIN_ID")
+
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is missing from .env")
+
+if not ADMIN_ID_VALUE or not ADMIN_ID_VALUE.isdigit():
+    raise ValueError("ADMIN_ID is missing or invalid in .env")
+
+ADMIN_ID = int(ADMIN_ID_VALUE)
+
+if ADMIN_ID <= 0:
+    raise ValueError("ADMIN_ID must be a positive number")
+
 
 CLASS = 1
 NAME = 2
