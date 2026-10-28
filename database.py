@@ -361,6 +361,145 @@ def check_payment(registration_id, database_name="registrations.db"):
 
     return "unknown_status"
 
+def set_payment_status(
+    registration_id,
+    status_key,
+    changed_by,
+    database_name="registrations.db"
+):
+    statuses = {
+        "unpaid": "پرداخت نشده",
+        "paid": "پرداخت موفق",
+        "failed": "پرداخت ناموفق",
+    }
+
+    payment_statuses = {
+        "unpaid": "در انتظار پرداخت",
+        "paid": "پرداخت موفق",
+        "failed": "پرداخت ناموفق",
+    }
+
+    if status_key not in statuses:
+        return "invalid_status"
+
+    connection = sqlite3.connect(database_name)
+
+    try:
+        cursor = connection.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        # بررسی وجود ثبت‌نام و وضعیت فعلی
+        cursor.execute(
+            """
+            SELECT payment_status
+            FROM registrations
+            WHERE id = ?
+            """,
+            (registration_id,)
+        )
+
+        registration = cursor.fetchone()
+
+        if registration is None:
+            connection.rollback()
+            return "registration_not_found"
+
+        old_status = registration[0]
+
+        # پیدا کردن آخرین پرداخت
+        cursor.execute(
+            """
+            SELECT id, status
+            FROM payments
+            WHERE registration_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (registration_id,)
+        )
+
+        payment = cursor.fetchone()
+
+        if payment is None:
+            connection.rollback()
+            return "payment_not_found"
+
+        payment_id, old_payment_status = payment
+
+        valid_registration_statuses = set(statuses.values())
+        valid_payment_statuses = set(payment_statuses.values())
+
+        if (
+            old_status not in valid_registration_statuses
+            or old_payment_status not in valid_payment_statuses
+        ):
+            connection.rollback()
+            return "invalid_current_status"
+
+        new_status = statuses[status_key]
+        new_payment_status = payment_statuses[status_key]
+
+        # اگر هر دو جدول از قبل هماهنگ هستند
+        if (
+            old_status == new_status
+            and old_payment_status == new_payment_status
+        ):
+            connection.rollback()
+            return "already_synced"
+
+        # تغییر وضعیت ثبت‌نام
+        cursor.execute(
+            """
+            UPDATE registrations
+            SET payment_status = ?
+            WHERE id = ?
+            """,
+            (new_status, registration_id)
+        )
+
+        # تغییر وضعیت آخرین پرداخت
+        cursor.execute(
+            """
+            UPDATE payments
+            SET status = ?
+            WHERE id = ?
+            """,
+            (new_payment_status, payment_id)
+        )
+
+        # ثبت تاریخچهٔ تغییر وضعیت ثبت‌نام
+        if old_status != new_status:
+            cursor.execute(
+                """
+                INSERT INTO payment_history
+                (
+                    registration_id,
+                    old_status,
+                    new_status,
+                    changed_by,
+                    changed_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    registration_id,
+                    old_status,
+                    new_status,
+                    changed_by,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                )
+            )
+
+        connection.commit()
+        return "updated"
+
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
 def check_registration_phone_constraint(database_name="registrations.db"):
     connection = sqlite3.connect(database_name)
     cursor = connection.cursor()

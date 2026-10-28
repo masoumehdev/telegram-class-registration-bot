@@ -16,7 +16,8 @@ from database import(
     get_class_capacity,
     update_class_info,
     create_phone_unique_index,
-    create_registration_with_payment
+    create_registration_with_payment,
+    set_payment_status
 )
 from telegram.ext import (
     Application,
@@ -212,14 +213,15 @@ async def payment_report(update, context):
 
     await update.message.reply_text(message)
 
-
 async def set_payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # بررسی دسترسی ادمین
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(
             "⛔ شما اجازه دسترسی به این بخش را ندارید."
         )
         return
 
+    # بررسی تعداد ورودی‌ها
     if len(context.args) != 2:
         await update.message.reply_text(
             "روش استفاده:\n"
@@ -227,31 +229,29 @@ async def set_payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    # بررسی شناسه ثبت‌نام
     try:
         registration_id = int(context.args[0])
+
         if registration_id <= 0:
             raise ValueError
+
     except ValueError:
         await update.message.reply_text(
             "❌ شماره ثبت‌نام باید یک عدد مثبت باشد."
         )
         return
 
-    statuses = {
+    # دریافت وضعیت درخواستی
+    status_key = context.args[1].lower()
+
+    status_names = {
         "unpaid": "پرداخت نشده",
         "paid": "پرداخت موفق",
         "failed": "پرداخت ناموفق",
     }
 
-    payment_statuses = {
-        "unpaid": "در انتظار پرداخت",
-        "paid": "پرداخت موفق",
-        "failed": "پرداخت ناموفق",
-    }
-
-    status_key = context.args[1].lower()
-
-    if status_key not in statuses:
+    if status_key not in status_names:
         await update.message.reply_text(
             "❌ وضعیت نامعتبر است.\n"
             "یکی از این گزینه‌ها را وارد کن:\n"
@@ -259,144 +259,65 @@ async def set_payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    connection = sqlite3.connect("registrations.db")
-    connection.execute("PRAGMA foreign_keys = ON")
-
+    # اجرای منطق دیتابیس
     try:
-        cursor = connection.cursor()
-        cursor.execute("BEGIN IMMEDIATE")
-
-        # بررسی وجود ثبت‌نام و خواندن وضعیت فعلی
-        cursor.execute(
-            """
-            SELECT payment_status
-            FROM registrations
-            WHERE id = ?
-            """,
-            (registration_id,)
+        result = set_payment_status(
+            registration_id=registration_id,
+            status_key=status_key,
+            changed_by=update.effective_user.id,
         )
-        registration = cursor.fetchone()
-
-        if registration is None:
-            connection.rollback()
-            await update.message.reply_text(
-                "❌ ثبت‌نامی با این شماره پیدا نشد."
-            )
-            return
-
-        old_status = registration[0]
-
-        # پیدا کردن آخرین رکورد پرداخت
-        cursor.execute(
-            """
-            SELECT id, status
-            FROM payments
-            WHERE registration_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (registration_id,)
-        )
-        payment = cursor.fetchone()
-
-        if payment is None:
-            connection.rollback()
-            await update.message.reply_text(
-                "❌ برای این ثبت‌نام رکورد پرداختی وجود ندارد؛ "
-                "وضعیت تغییر نکرد."
-            )
-            return
-
-        payment_id, old_payment_status = payment
-
-        valid_registration_statuses = set(statuses.values())
-        valid_payment_statuses = set(payment_statuses.values())
-
-        if (
-            old_status not in valid_registration_statuses
-            or old_payment_status not in valid_payment_statuses
-        ):
-            connection.rollback()
-            await update.message.reply_text(
-                "❌ وضعیت فعلی در پایگاه داده معتبر نیست؛ "
-                "هیچ تغییری اعمال نشد."
-            )
-            return
-
-        new_status = statuses[status_key]
-        new_payment_status = payment_statuses[status_key]
-
-        # اگر هر دو جدول از قبل هماهنگ هستند، کاری نکن
-        if (
-            old_status == new_status
-            and old_payment_status == new_payment_status
-        ):
-            connection.rollback()
-            await update.message.reply_text(
-                "ℹ️ وضعیت پرداخت از قبل درست و هماهنگ است؛ "
-                "تغییری ثبت نشد."
-            )
-            return
-
-        # تغییر وضعیت ثبت‌نام
-        cursor.execute(
-            """
-            UPDATE registrations
-            SET payment_status = ?
-            WHERE id = ?
-            """,
-            (new_status, registration_id)
-        )
-
-        # تغییر وضعیت آخرین پرداخت
-        cursor.execute(
-            """
-            UPDATE payments
-            SET status = ?
-            WHERE id = ?
-            """,
-            (new_payment_status, payment_id)
-        )
-
-        # تاریخچه فقط وقتی وضعیت ثبت‌نام تغییر کرده ثبت می‌شود
-        if old_status != new_status:
-            cursor.execute(
-                """
-                INSERT INTO payment_history
-                (
-                    registration_id,
-                    old_status,
-                    new_status,
-                    changed_by,
-                    changed_at
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    registration_id,
-                    old_status,
-                    new_status,
-                    update.effective_user.id,
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                )
-            )
-
-        connection.commit()
 
     except sqlite3.Error:
-        connection.rollback()
         await update.message.reply_text(
             "❌ خطای پایگاه داده رخ داد؛ "
             "تغییرات ذخیره نشدند."
         )
         return
 
-    finally:
-        connection.close()
+    if result == "invalid_status":
+        await update.message.reply_text(
+            "❌ وضعیت پرداخت نامعتبر است؛ "
+            "یکی از گزینه‌های unpaid، paid یا failed را وارد کن."
+        )
+        return
+
+    # بررسی نتیجه و ارسال پیام مناسب
+    if result == "registration_not_found":
+        await update.message.reply_text(
+            "❌ ثبت‌نامی با این شماره پیدا نشد."
+        )
+        return
+
+    if result == "payment_not_found":
+        await update.message.reply_text(
+            "❌ برای این ثبت‌نام رکورد پرداختی وجود ندارد؛ "
+            "وضعیت تغییر نکرد."
+        )
+        return
+
+    if result == "invalid_current_status":
+        await update.message.reply_text(
+            "❌ وضعیت فعلی در پایگاه داده معتبر نیست؛ "
+            "هیچ تغییری اعمال نشد."
+        )
+        return
+
+    if result == "already_synced":
+        await update.message.reply_text(
+            "ℹ️ وضعیت پرداخت از قبل درست و هماهنگ است؛ "
+            "تغییری ثبت نشد."
+        )
+        return
+
+    if result != "updated":
+        await update.message.reply_text(
+            "❌ عملیات تغییر وضعیت انجام نشد."
+        )
+        return
 
     await update.message.reply_text(
         f"✅ وضعیت پرداخت ثبت‌نام شماره {registration_id} "
-        f"به «{new_status}» تغییر کرد.\n"
+        f"به «{status_names[status_key]}» تغییر کرد.\n"
         f"📋 وضعیت جدول پرداخت‌ها نیز هماهنگ شد."
     )
 
